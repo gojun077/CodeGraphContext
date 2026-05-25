@@ -694,6 +694,35 @@ const Explore = () => {
     autoFetchAndIndex();
   }, [owner, repo]);
 
+  // ✅ Automatic Graph Caching: Safely caches all graphs (local folder uploads, ZIPs, CGC bundles) to IndexedDB!
+  useEffect(() => {
+    if (!graphData) return;
+
+    const saveToCache = async () => {
+      const metaRepo = graphData.metadata?.repo || "";
+      let cleanOwner = "local";
+      let cleanRepo = metaRepo || "local-project";
+
+      if (metaRepo.includes("/")) {
+        const parts = metaRepo.split("/");
+        cleanOwner = parts[0];
+        cleanRepo = parts[1];
+      } else if (owner && repo) {
+        cleanOwner = owner;
+        cleanRepo = repo;
+      }
+
+      try {
+        await cacheGraph(cleanOwner, cleanRepo, graphData);
+        console.log(`[Cache] Automatically cached active graph for ${cleanOwner}/${cleanRepo} in IndexedDB.`);
+      } catch (cacheErr) {
+        console.warn("[Cache] Failed to auto-save graph to IndexedDB:", cacheErr);
+      }
+    };
+
+    saveToCache();
+  }, [graphData, owner, repo]);
+
   // ✅ Supabase Realtime Signaling Tunnel: Bridges ChatGPT Action calls to browser's AST Code Graph!
   useEffect(() => {
     // 1. Get Supabase credentials (with 100% robust safe production fallbacks!)
