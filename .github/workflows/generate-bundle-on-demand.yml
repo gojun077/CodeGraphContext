@@ -169,6 +169,8 @@ jobs:
           import os
           import json
           import base64
+          import requests
+          from datetime import datetime, timezone
           from pathlib import Path
           from huggingface_hub import HfApi
 
@@ -198,16 +200,15 @@ jobs:
 
           # 2. Fetch the current manifest from Hugging Face
           manifest_path = Path("manifest.json")
+          manifest_url = f"https://huggingface.co/datasets/{hf_repo}/raw/main/manifest.json"
           try:
-              api.hf_hub_download(
-                  repo_id=hf_repo,
-                  filename="manifest.json",
-                  repo_type="dataset",
-                  local_dir=".",
-                  local_dir_use_symlinks=False
-              )
-              with open(manifest_path, "r") as f:
-                  manifest = json.load(f)
+              headers = {"Authorization": f"Bearer {hf_token}"}
+              r = requests.get(manifest_url, headers=headers, timeout=10)
+              if r.status_code == 200:
+                  manifest = r.json()
+              else:
+                  print(f"Manifest fetch returned status {r.status_code}. Starting fresh.")
+                  manifest = {"bundles": []}
           except Exception as e:
               print(f"No existing manifest found or failed to download: {e}. Starting fresh.")
               manifest = {"bundles": []}
@@ -218,6 +219,7 @@ jobs:
           repo_full = f"{repo_owner}/{repo_name}"
           clean_repo_name = repo_full.replace("/", "_")
           version = "${{ steps.repo-meta.outputs.tag }}"
+          generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
           new_entry = {
               "name": repo_name,
@@ -226,7 +228,7 @@ jobs:
               "version": version,
               "size": "${{ steps.export.outputs.bundle_size }}",
               "download_url": f"https://huggingface.co/datasets/{hf_repo}/resolve/main/bundles/{base64_filename}",
-              "generated_at": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
+              "generated_at": generated_at,
               "source": "server-indexed"
           }
 
