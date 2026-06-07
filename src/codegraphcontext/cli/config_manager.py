@@ -204,11 +204,12 @@ def normalize_config_path(value: str, *, absolute: bool = False, base_dir: Optio
     return str(path_obj)
 
 
-def ensure_config_dir(path: Path = CONFIG_DIR):
+def ensure_config_dir(path: Optional[Path] = None):
     """
     Ensure that the configuration directory exists.
     Creates the directory and a logs subdirectory if they do not already exist.
     """
+    path = path or CONFIG_DIR
     path.mkdir(parents=True, exist_ok=True)
     (path / "logs").mkdir(parents=True, exist_ok=True)
 
@@ -513,7 +514,15 @@ def set_config_value(key: str, value: str) -> bool:
 
 def reset_config():
     """Reset configuration to defaults (preserves database credentials)."""
+    import shutil
+    from datetime import datetime
+
     ensure_config_dir()
+    if CONFIG_FILE.exists():
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup = CONFIG_FILE.with_name(f"{CONFIG_FILE.name}.{stamp}.bak")
+        shutil.copy2(CONFIG_FILE, backup)
+        console.print(f"[dim]Backed up current config to {backup}[/dim]")
     save_config(DEFAULT_CONFIG.copy(), preserve_db_credentials=True)
     console.print("[green]✅ Configuration reset to defaults[/green]")
     console.print("[cyan]Note: Database credentials were preserved[/cyan]")
@@ -538,22 +547,21 @@ def _print_welcome_banner() -> None:
     console.print()
 
 
-def ensure_first_run_bootstrap() -> bool:
+def ensure_first_run_bootstrap(show_welcome: bool = False) -> bool:
     """Run one-time setup for brand-new installs.
 
-    Creates default config files, the global .cgcignore, and prints a
-    welcome banner.  Returns True when bootstrap was performed.
+    Creates default config files and the global .cgcignore silently.
+    Returns True when bootstrap was performed.
     """
     if _FIRST_RUN_MARKER.exists():
         return False
 
     ensure_config_dir()
     ensure_global_cgcignore()
-    # Ensure config.yaml exists (triggers creation with defaults)
     load_context_config()
-    _print_welcome_banner()
+    if show_welcome:
+        _print_welcome_banner()
 
-    # Stamp so we don't repeat
     _FIRST_RUN_MARKER.parent.mkdir(parents=True, exist_ok=True)
     _FIRST_RUN_MARKER.write_text("1")
     return True
@@ -792,6 +800,10 @@ def find_local_cgc_dir(start: Optional[Path] = None) -> Optional[Path]:
     return None
 
 
+class ContextNotFoundError(ValueError):
+    """Raised when --context names an unregistered workspace."""
+
+
 def resolve_context(
     cli_context: Optional[str] = None,
     cwd: Optional[Path] = None,
@@ -811,23 +823,21 @@ def resolve_context(
     # --- 1. Explicit CLI flag ---
     if cli_context:
         ctx = cfg.contexts.get(cli_context)
-        db = ctx.database if ctx else "falkordb"
-        db_path = ctx.db_path if ctx else _default_db_path(cli_context, db)
-        cgcignore = (
-            ctx.cgcignore_path
-            if ctx
-            else str(CONFIG_DIR / "contexts" / cli_context / ".cgcignore")
-        )
+        if ctx is None:
+            raise ContextNotFoundError(
+                f"Context '{cli_context}' is not registered. "
+                f"Create it with: cgc context create {cli_context}"
+            )
         return ResolvedContext(
             mode="named",
             context_name=cli_context,
-            database=db,
-            db_path=db_path,
-            cgcignore_path=cgcignore,
+            database=ctx.database,
+            db_path=ctx.db_path,
+            cgcignore_path=ctx.cgcignore_path,
         )
 
-    # --- 2. Local .codegraphcontext/ in repo ---
-    local_cgc = find_local_cgc_dir(cwd)
+    # --- 2. Local .codegraphcontext/ in repo (per-repo mode only) ---
+    local_cgc = find_local_cgc_dir(cwd) if cfg.mode == "per-repo" else None
     
     # If we are in per-repo mode and no local folder was found, create it in CWD
     if local_cgc is None and cfg.mode == "per-repo":
@@ -864,8 +874,8 @@ def resolve_context(
             is_local=True,
         )
 
-    # --- 2b. Saved workspace mapping (CWD -> child .codegraphcontext/) ---
-    mapping = get_workspace_mapping(cwd)
+    # --- 2b. Saved workspace mapping (per-repo mode only) ---
+    mapping = get_workspace_mapping(cwd) if cfg.mode == "per-repo" else None
     if mapping:
         mapped_ctx_path = Path(mapping["context_path"])
         if mapped_ctx_path.exists() and mapped_ctx_path.is_dir():

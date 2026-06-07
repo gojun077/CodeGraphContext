@@ -5,7 +5,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse
 from pathlib import Path
-import re
 import uvicorn
 import json
 import os
@@ -39,22 +38,7 @@ def set_db_manager(manager: DatabaseManager):
     global db_manager
     db_manager = manager
 
-# Forbidden Cypher write keywords. Mirrors src/codegraphcontext/tools/handlers/query_handlers.py
-# so that the visualization HTTP endpoint enforces the same read-only contract as the
-# MCP tool. Without this, any caller able to reach the viz server (which by default
-# enables permissive CORS) could execute arbitrary write Cypher (CWE-943).
-_FORBIDDEN_CYPHER_KEYWORDS = (
-    'CREATE', 'MERGE', 'DELETE', 'SET', 'REMOVE', 'DROP', 'CALL apoc'
-)
-_STRING_LITERAL_RE = re.compile(r'''"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'''')
-
-def _is_read_only_cypher(query: str) -> bool:
-    """Return True if *query* contains no write keywords (outside string literals)."""
-    stripped = _STRING_LITERAL_RE.sub('', query)
-    for keyword in _FORBIDDEN_CYPHER_KEYWORDS:
-        if re.search(r'\b' + keyword + r'\b', stripped, re.IGNORECASE):
-            return False
-    return True
+from ..utils.cypher_readonly import is_read_only_cypher as _is_read_only_cypher
 
 @app.get("/api/graph")
 async def get_graph(repo_path: Optional[str] = None, cypher_query: Optional[str] = None):

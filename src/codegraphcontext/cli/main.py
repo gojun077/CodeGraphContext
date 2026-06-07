@@ -302,7 +302,6 @@ def _load_credentials(cli_context_flag: Optional[str] = None):
         ensure_config_dir,
         codegraphcontext_dotenv_at_cwd,
         normalize_config_path,
-        DB_PATH_ENV_KEYS,
     )
     
     # Ensure config directory exists (lazy initialization)
@@ -372,11 +371,6 @@ def _load_credentials(cli_context_flag: Optional[str] = None):
         if local_cgc_env and local_cgc_env.resolve() != global_env_path.resolve():
             with open(local_cgc_env, "r", encoding="utf-8", errors="replace") as f:
                 vals = dotenv_values(stream=f)
-                # Do not let a repo-local profile override another user's global DB paths.
-                vals = {
-                    k: v for k, v in (vals or {}).items()
-                    if k not in DB_PATH_ENV_KEYS
-                }
                 _append_source(str(local_cgc_env), vals)
     except Exception as e:
         console.print(
@@ -628,8 +622,7 @@ def bundle_export(
     
     services = _initialize_services(context)
     if not all(services[:3]):
-        from .cli_helpers import _fail_services_init
-        _fail_services_init()
+        return
     db_manager, _, code_finder = services[:3]
     
     try:
@@ -662,7 +655,6 @@ def bundle_export(
 def bundle_import(
     bundle_file: str = typer.Argument(..., help="Path to the .cgc bundle file to import"),
     clear: bool = typer.Option(False, "--clear", help="Clear existing graph data before importing"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation when using --clear"),
     context: Optional[str] = typer.Option(None, "--context", "-c", help="Specific context to use"),
 ):
     """
@@ -680,8 +672,7 @@ def bundle_import(
     
     services = _initialize_services(context)
     if not all(services[:3]):
-        from .cli_helpers import _fail_services_init
-        _fail_services_init()
+        return
     db_manager, graph_builder, code_finder = services[:3]
     
     try:
@@ -693,9 +684,9 @@ def bundle_import(
         
         if clear:
             console.print("[yellow]⚠️  Warning: This will clear all existing graph data![/yellow]")
-            if not yes and not typer.confirm("Are you sure you want to continue?", default=False):
+            if not typer.confirm("Are you sure you want to continue?", default=False):
                 console.print("[yellow]Import cancelled[/yellow]")
-                raise typer.Exit(code=1)
+                return
         
         console.print(f"[cyan]Importing bundle from {bundle_path}...[/cyan]")
         
@@ -1035,26 +1026,6 @@ def doctor():
                 console.print("   [red]✗[/red] LadybugDB core (ladybug) is not installed")
                 console.print("       Run: pip install ladybug")
                 all_checks_passed = False
-        elif default_db == "falkordb-remote":
-            host = os.environ.get("FALKORDB_HOST")
-            if host:
-                port = os.environ.get("FALKORDB_PORT", "6379")
-                console.print(f"   [cyan]Endpoint:[/cyan] {host}:{port}")
-                try:
-                    from codegraphcontext.core.database_falkordb_remote import FalkorDBRemoteManager
-                    ok, msg = FalkorDBRemoteManager.test_connection()
-                    if ok:
-                        console.print("   [green]✓[/green] FalkorDB remote connection successful")
-                    else:
-                        console.print(f"   [red]✗[/red] FalkorDB remote connection failed: {msg}")
-                        all_checks_passed = False
-                except Exception as exc:
-                    console.print(f"   [red]✗[/red] FalkorDB remote check error: {exc}")
-                    all_checks_passed = False
-            else:
-                console.print("   [red]✗[/red] FALKORDB_HOST is not configured")
-                console.print("       Run: cgc config set FALKORDB_HOST 127.0.0.1")
-                all_checks_passed = False
         else:
             # FalkorDB
             try:
@@ -1229,8 +1200,7 @@ def delete(
         # Delete all repositories
         services = _initialize_services(context)
         if not all(services[:3]):
-            from .cli_helpers import _fail_services_init
-            _fail_services_init()
+            return
         db_manager, graph_builder, code_finder = services[:3]
         
         try:
@@ -1465,8 +1435,7 @@ def find_by_name(
     _load_credentials()
     services = _initialize_services(context)
     if not all(services[:3]):
-        from .cli_helpers import _fail_services_init
-        _fail_services_init()
+        return
     db_manager, graph_builder, code_finder = services[:3]
 
     # Resolve effective fuzzy setting: CLI flag wins, else config, else true.
@@ -1588,8 +1557,7 @@ def find_by_pattern(
     _load_credentials()
     services = _initialize_services(context)
     if not all(services[:3]):
-        from .cli_helpers import _fail_services_init
-        _fail_services_init()
+        return
     db_manager, graph_builder, code_finder = services[:3]
     
     try:
@@ -1682,8 +1650,7 @@ def find_by_type(
     _load_credentials()
     services = _initialize_services(context)
     if not all(services[:3]):
-        from .cli_helpers import _fail_services_init
-        _fail_services_init()
+        return
     db_manager, graph_builder, code_finder = services[:3]
     
     try:
@@ -1738,8 +1705,7 @@ def find_by_variable(
     _load_credentials()
     services = _initialize_services(context)
     if not all(services[:3]):
-        from .cli_helpers import _fail_services_init
-        _fail_services_init()
+        return
     db_manager, graph_builder, code_finder = services[:3]
     
     try:
@@ -1785,8 +1751,7 @@ def find_by_content_search(
     _load_credentials()
     services = _initialize_services(context)
     if not all(services[:3]):
-        from .cli_helpers import _fail_services_init
-        _fail_services_init()
+        return
     db_manager, graph_builder, code_finder = services[:3]
     
     try:
@@ -1848,8 +1813,7 @@ def find_by_decorator_search(
     _load_credentials()
     services = _initialize_services(context)
     if not all(services[:3]):
-        from .cli_helpers import _fail_services_init
-        _fail_services_init()
+        return
     db_manager, graph_builder, code_finder = services[:3]
     
     try:
@@ -1897,8 +1861,7 @@ def find_by_argument_search(
     _load_credentials()
     services = _initialize_services(context)
     if not all(services[:3]):
-        from .cli_helpers import _fail_services_init
-        _fail_services_init()
+        return
     db_manager, graph_builder, code_finder = services[:3]
     
     try:
@@ -1954,8 +1917,7 @@ def analyze_calls(
     _load_credentials()
     services = _initialize_services(context)
     if not all(services[:3]):
-        from .cli_helpers import _fail_services_init
-        _fail_services_init()
+        return
     db_manager, graph_builder, code_finder = services[:3]
     
     try:
@@ -2011,8 +1973,7 @@ def analyze_callers(
     _load_credentials()
     services = _initialize_services(context)
     if not all(services[:3]):
-        from .cli_helpers import _fail_services_init
-        _fail_services_init()
+        return
     db_manager, graph_builder, code_finder = services[:3]
     
     try:
@@ -2073,8 +2034,7 @@ def analyze_chain(
     _load_credentials()
     services = _initialize_services(context)
     if not all(services[:3]):
-        from .cli_helpers import _fail_services_init
-        _fail_services_init()
+        return
     db_manager, graph_builder, code_finder = services[:3]
     
     try:
@@ -2144,8 +2104,7 @@ def analyze_kotlin_call_audit(
     _load_credentials()
     services = _initialize_services(context)
     if not all(services[:3]):
-        from .cli_helpers import _fail_services_init
-        _fail_services_init()
+        return
     db_manager, _, code_finder = services[:3]
 
     try:
@@ -2205,8 +2164,7 @@ def analyze_dependencies(
     _load_credentials()
     services = _initialize_services(context)
     if not all(services[:3]):
-        from .cli_helpers import _fail_services_init
-        _fail_services_init()
+        return
     db_manager, graph_builder, code_finder = services[:3]
     
     try:
@@ -2258,8 +2216,7 @@ def analyze_inheritance_tree(
     _load_credentials()
     services = _initialize_services(context)
     if not all(services[:3]):
-        from .cli_helpers import _fail_services_init
-        _fail_services_init()
+        return
     db_manager, graph_builder, code_finder = services[:3]
     
     try:
@@ -2329,8 +2286,7 @@ def analyze_complexity(
     _load_credentials()
     services = _initialize_services(context)
     if not all(services[:3]):
-        from .cli_helpers import _fail_services_init
-        _fail_services_init()
+        return
     db_manager, graph_builder, code_finder = services[:3]
 
     _FILE_EXTENSIONS = ('.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.rs', '.rb',
@@ -2407,8 +2363,7 @@ def analyze_dead_code(
     _load_credentials()
     services = _initialize_services(context)
     if not all(services[:3]):
-        from .cli_helpers import _fail_services_init
-        _fail_services_init()
+        return
     db_manager, graph_builder, code_finder = services[:3]
     
     try:
@@ -2462,8 +2417,7 @@ def analyze_overrides(
     _load_credentials()
     services = _initialize_services(context)
     if not all(services[:3]):
-        from .cli_helpers import _fail_services_init
-        _fail_services_init()
+        return
     db_manager, graph_builder, code_finder = services[:3]
     
     try:
@@ -2518,8 +2472,7 @@ def analyze_variable_usage(
     _load_credentials()
     services = _initialize_services(context)
     if not all(services[:3]):
-        from .cli_helpers import _fail_services_init
-        _fail_services_init()
+        return
     db_manager, graph_builder, code_finder = services[:3]
     
     try:
@@ -2681,7 +2634,7 @@ def main(
         "--database", 
         "--db",
         "-db", 
-        help="[Global] Temporarily override database backend (falkordb, falkordb-remote, kuzudb, ladybugdb, neo4j, or nornic) for any command"
+        help="[Global] Temporarily override database backend (falkordb, falkordb-remote, neo4j, or kuzudb) for any command"
     ),
     visual: bool = typer.Option(
         False,
@@ -2896,7 +2849,104 @@ def _write_datasource_graph(ingested: dict) -> None:
         raise typer.Exit(1)
 
     from codegraphcontext.tools.indexing.persistence.writer import GraphWriter
-    GraphWriter(driver, db_manager=dm).write_datasource_graph(ingested)
+    GraphWriter(driver).write_datasource_graph(ingested)
+
+
+if __name__ == "__main__":
+    app()
+    host: str = typer.Option(..., "--host", "-H", help="Cassandra contact point (comma-separated for multiple)"),
+    port: int = typer.Option(9042, "--port", "-p", help="Cassandra native transport port"),
+    keyspace: str = typer.Option(..., "--keyspace", "-k", help="Keyspace to ingest"),
+    username: Optional[str] = typer.Option(None, "--user", "-u", help="Cassandra username"),
+    password: Optional[str] = typer.Option(None, "--password", "-P", help="Cassandra password", hide_input=True),
+    name: Optional[str] = typer.Option(None, "--name", "-n", help="Logical datasource name (default: cassandra-<keyspace>)"),
+    env: str = typer.Option("production", "--env", "-e", help="Deployment environment label"),
+    context: Optional[str] = typer.Option(None, "--context", "-c", help="CGC context to use"),
+):
+    """Ingest Cassandra keyspace schema (tables + columns) and write to the code graph.
+
+    Requires: pip install cassandra-driver
+    """
+    try:
+        from codegraphcontext.tools.datasources.cassandra_ingester import ingest as cassandra_ingest
+    except ImportError as e:
+        console.print(f"[red]Import error:[/red] {e}")
+        raise typer.Exit(1)
+
+    hosts = [h.strip() for h in host.split(",")]
+    console.print(f"[cyan]Connecting to Cassandra at {hosts}/{keyspace}...[/cyan]")
+    try:
+        result = cassandra_ingest(hosts=hosts, port=port, keyspace=keyspace,
+                                   username=username, password=password, name=name, env=env)
+    except Exception as exc:
+        console.print(f"[red]Failed to connect / ingest:[/red] {exc}")
+        raise typer.Exit(1)
+
+    _write_datasource_graph(result, context=context)
+    console.print(
+        f"[green]✓ Cassandra datasource[/green] [bold]{result['datasource']['name']}[/bold] indexed: "
+        f"{len(result.get('tables', []))} tables, {len(result.get('columns', []))} columns"
+    )
+
+
+@datasource_app.command("redis")
+def datasource_redis(
+    ctx: typer.Context,
+    host: str = typer.Option(..., "--host", "-H", help="Redis host"),
+    port: int = typer.Option(6379, "--port", "-p", help="Redis port"),
+    db: int = typer.Option(0, "--db", help="Redis database index"),
+    password: Optional[str] = typer.Option(None, "--password", "-P", help="Redis AUTH password", hide_input=True),
+    name: Optional[str] = typer.Option(None, "--name", "-n", help="Logical datasource name"),
+    env: str = typer.Option("production", "--env", "-e", help="Deployment environment label"),
+    max_keys: int = typer.Option(10000, "--max-keys", help="Maximum keys to scan (avoid full scan in large clusters)"),
+    context: Optional[str] = typer.Option(None, "--context", "-c", help="CGC context to use"),
+):
+    """Discover Redis key patterns and write to the code graph.
+
+    Scans up to --max-keys keys and groups them into patterns (e.g. user:*).
+
+    Requires: pip install redis
+    """
+    try:
+        from codegraphcontext.tools.datasources.redis_ingester import ingest as redis_ingest
+    except ImportError as e:
+        console.print(f"[red]Import error:[/red] {e}")
+        raise typer.Exit(1)
+
+    console.print(f"[cyan]Connecting to Redis at {host}:{port}/{db}...[/cyan]")
+    try:
+        result = redis_ingest(host=host, port=port, db=db, password=password,
+                               name=name, env=env, max_keys=max_keys)
+    except Exception as exc:
+        console.print(f"[red]Failed to connect / ingest:[/red] {exc}")
+        raise typer.Exit(1)
+
+    _write_datasource_graph(result, context=context)
+    console.print(
+        f"[green]✓ Redis datasource[/green] [bold]{result['datasource']['name']}[/bold] indexed: "
+        f"{len(result.get('key_patterns', []))} key patterns"
+    )
+
+
+def _write_datasource_graph(ingested: dict, context: Optional[str] = None) -> None:
+    """Shared helper: write ingested datasource dict to the active graph."""
+    from .cli_helpers import _initialize_services, _fail_services_init
+
+    services = _initialize_services(context)
+    if not all(services[:3]):
+        _fail_services_init()
+
+    db_manager, _, _, _ctx = services
+    try:
+        driver = db_manager.get_driver()
+        if driver is None:
+            console.print("[red]No active graph connection.[/red]")
+            raise typer.Exit(1)
+
+        from codegraphcontext.tools.indexing.persistence.writer import GraphWriter
+        GraphWriter(driver, db_manager=db_manager).write_datasource_graph(ingested)
+    finally:
+        db_manager.close_driver()
 
 
 if __name__ == "__main__":

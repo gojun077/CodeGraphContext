@@ -1136,3 +1136,10 @@ class LadybugResultWrapper:
 
     def __iter__(self):
         return iter([LadybugRecord(r) for r in self.data_raw()])
+
+    def data(self) -> List[Dict[str, Any]]:
+        # Return raw dict data, not LadybugRecord.data()
+        return self.data_raw()
+
+    def __iter__(self):
+        return iter([LadybugRecord(r) for r in self.data_raw()])

@@ -373,66 +373,66 @@ class CGCBundle:
     
     def _extract_schema(self) -> Dict[str, Any]:
         """Extract the graph schema (node labels, relationship types, constraints)."""
+        from codegraphcontext.tools.indexing.schema_contract import RELATIONSHIP_TYPES
+
         schema = {
             "node_labels": [],
             "relationship_types": [],
             "constraints": [],
             "indexes": []
         }
-        
+
+        backend = getattr(self.db_manager, "get_backend_type", lambda: "neo4j")()
+
         with self.db_manager.get_driver().session() as session:
-            # Get node labels (backend-aware)
-            backend = getattr(self.db_manager, "get_backend_type", lambda: "neo4j")()
             try:
                 if backend in ("kuzudb", "ladybugdb"):
-                    # KuzuDB/LadybugDB: SHOW TABLES not available in ≤ 0.11
                     result = session.run("MATCH (n) RETURN DISTINCT label(n) AS lbl")
                     labels = sorted({record[0] for record in result if record[0] is not None})
-                else:
+                elif backend == "neo4j":
                     result = session.run("CALL db.labels()")
                     labels = []
                     for record in result:
                         try:
                             labels.append(record[0])
                         except (KeyError, TypeError):
-                            if hasattr(record, 'values'):
+                            if hasattr(record, "values"):
                                 vals = list(record.values())
                                 if vals:
                                     labels.append(vals[0])
+                else:
+                    result = session.run("CALL db.labels()")
+                    labels = [record[0] for record in result if record[0] is not None]
                 schema["node_labels"] = labels
             except Exception:
                 schema["node_labels"] = []
-            
-            # Get relationship types
+
             try:
-                result = session.run("CALL db.relationshipTypes()")
-                rel_types = []
-                for record in result:
-                    try:
-                        rel_types.append(record[0])
-                    except (KeyError, TypeError):
-                        if hasattr(record, 'values'):
-                            vals = list(record.values())
-                            if vals:
-                                rel_types.append(vals[0])
-                schema["relationship_types"] = rel_types
+                if backend in ("kuzudb", "ladybugdb"):
+                    result = session.run("MATCH ()-[r]->() RETURN DISTINCT label(r) AS rel")
+                    rel_types = sorted({record[0] for record in result if record[0] is not None})
+                elif backend == "neo4j":
+                    result = session.run("CALL db.relationshipTypes()")
+                    rel_types = [record[0] for record in result if record[0] is not None]
+                else:
+                    result = session.run("CALL db.relationshipTypes()")
+                    rel_types = [record[0] for record in result if record[0] is not None]
+                schema["relationship_types"] = rel_types or sorted(RELATIONSHIP_TYPES)
             except Exception:
-                schema["relationship_types"] = []
-            
-            # Get constraints (Neo4j specific, may not work on all backends)
-            try:
-                result = session.run("SHOW CONSTRAINTS")
-                schema["constraints"] = [dict(record) for record in result]
-            except:
-                pass
-            
-            # Get indexes
-            try:
-                result = session.run("SHOW INDEXES")
-                schema["indexes"] = [dict(record) for record in result]
-            except:
-                pass
-        
+                schema["relationship_types"] = sorted(RELATIONSHIP_TYPES)
+
+            if backend == "neo4j":
+                try:
+                    result = session.run("SHOW CONSTRAINTS")
+                    schema["constraints"] = [dict(record) for record in result]
+                except Exception:
+                    pass
+                try:
+                    result = session.run("SHOW INDEXES")
+                    schema["indexes"] = [dict(record) for record in result]
+                except Exception:
+                    pass
+
         return schema
     
     def _extract_nodes(self, output_file: Path, repo_path: Optional[Path]) -> int:

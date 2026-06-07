@@ -130,8 +130,17 @@ def load_bundle(code_finder: CodeFinder, **args) -> Dict[str, Any]:
     try:
         debug_log(f"Loading bundle: {bundle_name}")
         
+        from ...utils.path_sandbox import is_path_allowed
+
         # Check if bundle exists locally
-        bundle_path = Path(bundle_name)
+        bundle_path = Path(bundle_name).resolve()
+        if not is_path_allowed(bundle_path):
+            return {
+                "error": (
+                    f"Bundle path '{bundle_path}' is outside allowed roots. "
+                    "Use a bundle under the workspace or CGC_ALLOWED_ROOTS."
+                )
+            }
         
         # If it doesn't exist as-is, try with .cgc extension
         if not bundle_path.exists() and not str(bundle_name).endswith('.cgc'):
@@ -203,16 +212,15 @@ def search_registry_bundles(code_finder: CodeFinder, **args) -> Dict[str, Any]:
     
     try:
         debug_log(f"Searching registry for: {query}")
-        
-        # Fetch directly from core registry
+
         bundles = BundleRegistry.fetch_available_bundles()
-        
+
         if not bundles:
             return {
                 "success": True,
                 "bundles": [],
                 "total": 0,
-                "message": "No bundles found in registry"
+                "message": "No bundles found in registry",
             }
         
         # Filter by query if provided
@@ -263,6 +271,13 @@ def search_registry_bundles(code_finder: CodeFinder, **args) -> Dict[str, Any]:
         return response
     
     except Exception as e:
+        from ...core.bundle_registry import RegistryUnavailableError
+        if isinstance(e, RegistryUnavailableError):
+            return {
+                "success": False,
+                "error": str(e),
+                "message": "Bundle registry unreachable — internet connection required.",
+            }
         debug_log(f"Error searching registry: {str(e)}")
         return {"error": f"Failed to search registry: {str(e)}"}
 

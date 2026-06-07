@@ -29,7 +29,13 @@ from ..tools.package_resolver import get_local_package_path
 from ..utils.debug_log import info_logger, warning_logger
 from ..core.database import Neo4jConnectionError
 from ..utils.repo_path import any_repo_matches_path
-from .config_manager import resolve_context, ResolvedContext, register_repo_in_context, ensure_first_run_bootstrap
+from .config_manager import (
+    resolve_context,
+    ResolvedContext,
+    register_repo_in_context,
+    ensure_first_run_bootstrap,
+    ContextNotFoundError,
+)
 
 console = Console()
 
@@ -41,6 +47,9 @@ def _fail_services_init() -> None:
 
 def _kuzu_fallback_path(ctx: ResolvedContext) -> Optional[str]:
     """Derive a KùzuDB directory when falling back from another backend."""
+    runtime = os.getenv("CGC_RUNTIME_DB_PATH")
+    if runtime:
+        return str(Path(runtime).expanduser().resolve())
     if ctx.db_path:
         return str(Path(ctx.db_path).parent / "kuzudb")
     try:
@@ -85,7 +94,11 @@ def _initialize_services(
     """
     ensure_first_run_bootstrap()
     console.print("[dim]Resolving context...[/dim]")
-    ctx = resolve_context(cli_context_flag, cwd=cwd)
+    try:
+        ctx = resolve_context(cli_context_flag, cwd=cwd)
+    except ContextNotFoundError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(code=1)
     
     # Let the user know what context we're operating in
     if ctx.mode == "named":
@@ -120,6 +133,8 @@ def _initialize_services(
         # Check if this is a FalkorDB failure that should trigger a KùzuDB fallback
         from ..core.database_falkordb import FalkorDBUnavailableError
         if isinstance(e, FalkorDBUnavailableError):
+            from ..core import mark_falkordb_unavailable
+            mark_falkordb_unavailable()
             console.print(f"[yellow]⚠ FalkorDB Lite is not functional in this environment: {e}[/yellow]")
             console.print("[cyan]Falling back to KùzuDB for a reliable experience...[/cyan]")
             
@@ -327,7 +342,7 @@ def add_package_helper(package_name: str, language: str, context: Optional[str] 
     if not package_path_str:
         console.print(f"[red]Error: Could not find package '{package_name}' for language '{language}'.[/red]")
         db_manager.close_driver()
-        return
+        raise typer.Exit(code=1)
 
     package_path = Path(package_path_str)
     
@@ -345,6 +360,7 @@ def add_package_helper(package_name: str, language: str, context: Optional[str] 
         console.print(f"[green]Successfully finished indexing package: {package_name}[/green]")
     except Exception as e:
         console.print(f"[bold red]An error occurred during package indexing:[/bold red] {e}")
+        raise typer.Exit(code=1)
     finally:
         db_manager.close_driver()
 
@@ -406,23 +422,26 @@ def cypher_helper(query: str, context: Optional[str] = None):
         _fail_services_init()
 
     db_manager, _, _, ctx = services
-    
-    # Replicating safety checks from MCPServer (using word boundaries to avoid false positives like 'createEmail')
-    import re
-    forbidden_keywords = ['CREATE', 'MERGE', 'DELETE', 'SET', 'REMOVE', 'DROP', 'CALL apoc']
-    pattern = r'\b(' + '|'.join(forbidden_keywords) + r')\b'
-    if re.search(pattern, query, re.IGNORECASE):
-        console.print("[bold red]Error: This command only supports read-only queries.[/bold red]")
+
+    from ..utils.cypher_readonly import is_read_only_cypher, read_only_rejection_message
+
+    if not is_read_only_cypher(query):
+        console.print(f"[bold red]Error:[/bold red] {read_only_rejection_message()}")
         db_manager.close_driver()
         raise typer.Exit(code=1)
 
+    backend = getattr(db_manager, "get_backend_type", lambda: "neo4j")()
+    session_kwargs = {"default_access_mode": "READ"} if backend == "neo4j" else {}
+
     try:
-        with db_manager.get_driver().session() as session:
+        with db_manager.get_driver().session(**session_kwargs) as session:
             result = session.run(query)
             records = [record.data() for record in result]
             console.print(json.dumps(records, indent=2))
     except Exception as e:
         console.print(f"[bold red]An error occurred while executing query:[/bold red] {e}")
+        db_manager.close_driver()
+        raise typer.Exit(code=1)
     finally:
         db_manager.close_driver()
 
@@ -430,34 +449,25 @@ def cypher_helper(query: str, context: Optional[str] = None):
 def cypher_helper_visual(query: str, context: Optional[str] = None):
     """Executes a read-only Cypher query and visualizes the results."""
     from .visualizer import visualize_cypher_results
-    
+    from ..utils.cypher_readonly import is_read_only_cypher, read_only_rejection_message
+
     services = _initialize_services(context)
     if not all(services[:3]):
         _fail_services_init()
 
     db_manager, _, _, ctx = services
-    
-    # Replicating safety checks from MCPServer (using word boundaries to avoid false positives like 'createEmail')
-    import re
-    forbidden_keywords = ['CREATE', 'MERGE', 'DELETE', 'SET', 'REMOVE', 'DROP', 'CALL apoc']
-    pattern = r'\b(' + '|'.join(forbidden_keywords) + r')\b'
-    if re.search(pattern, query, re.IGNORECASE):
-        console.print("[bold red]Error: This command only supports read-only queries.[/bold red]")
+
+    if not is_read_only_cypher(query):
+        console.print(f"[bold red]Error:[/bold red] {read_only_rejection_message()}")
         db_manager.close_driver()
         raise typer.Exit(code=1)
 
     try:
-        with db_manager.get_driver().session() as session:
-            result = session.run(query)
-            records = [record.data() for record in result]
-            
-            if not records:
-                console.print("[yellow]No results to visualize.[/yellow]")
-                return  # finally block will close driver
-            
-            visualize_cypher_results(records, query)
+        visualize_cypher_results(query)
     except Exception as e:
         console.print(f"[bold red]An error occurred while executing query:[/bold red] {e}")
+        db_manager.close_driver()
+        raise typer.Exit(code=1)
     finally:
         db_manager.close_driver()
 
@@ -466,7 +476,12 @@ import uvicorn
 import urllib.parse
 from ..viz.server import run_server, set_db_manager
 
-def visualize_helper(repo_path: Optional[str] = None, port: int = 8000, context: Optional[str] = None):
+def visualize_helper(
+    repo_path: Optional[str] = None,
+    port: int = 8000,
+    context: Optional[str] = None,
+    cypher_query: Optional[str] = None,
+):
     """Generates an interactive visualization using the Playground UI."""
     services = _initialize_services(context)
     if not all(services[:3]):
@@ -537,7 +552,9 @@ def visualize_helper(repo_path: Optional[str] = None, port: int = 8000, context:
     params = {"backend": backend_url}
     if repo_path:
         params["repo_path"] = str(Path(repo_path).resolve())
-    
+    if cypher_query:
+        params["cypher_query"] = cypher_query
+
     query_string = urllib.parse.urlencode(params)
     visualization_url = f"{backend_url}/explore?{query_string}"
     
@@ -565,17 +582,18 @@ def visualize_helper(repo_path: Optional[str] = None, port: int = 8000, context:
 def reindex_helper(path: str, context: Optional[str] = None):
     """Force re-index by deleting and rebuilding the repository."""
     time_start = time.time()
-    services = _initialize_services(context)
+    path_obj = Path(path).resolve()
+    index_cwd = path_obj if path_obj.is_dir() else path_obj.parent
+    services = _initialize_services(context, cwd=index_cwd)
     if not all(services[:3]):
         _fail_services_init()
 
     db_manager, graph_builder, code_finder, ctx = services
-    path_obj = Path(path).resolve()
 
     if not path_obj.exists():
         console.print(f"[red]Error: Path does not exist: {path_obj}[/red]")
         db_manager.close_driver()
-        return
+        raise typer.Exit(code=1)
 
     # Check if already indexed
     indexed_repos = code_finder.list_indexed_repositories()
@@ -589,7 +607,7 @@ def reindex_helper(path: str, context: Optional[str] = None):
         except Exception as e:
             console.print(f"[red]Error deleting old index: {e}[/red]")
             db_manager.close_driver()
-            return
+            raise typer.Exit(code=1)
     
     console.print(f"[cyan]Re-indexing: {path_obj}[/cyan]")
     
@@ -627,14 +645,13 @@ def clean_helper(context: Optional[str] = None):
         batch_size = 500
         
         with db_manager.get_driver().session() as session:
-            # Layer-by-layer deletion: iteratively delete nodes that lost
-            # their CONTAINS parent. Each pass peels one layer of the
-            # Repository → File → Class/Function → Variable hierarchy.
+            # Delete nodes with no incoming relationships (true orphans).
+            # Parameters (HAS_PARAMETER), import Modules (IMPORTS), etc. are kept.
             while True:
                 result = session.run("""
                     MATCH (n)
                     WHERE NOT n:Repository
-                      AND NOT ()-[:CONTAINS]->(n)
+                      AND NOT ()-[]->(n)
                     WITH n LIMIT $batch_size
                     DETACH DELETE n
                     RETURN count(n) as deleted

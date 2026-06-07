@@ -135,7 +135,14 @@ class RepositoryEventHandler(FileSystemEventHandler):
             if "error" not in parsed_data:
                 self.all_file_data.append(parsed_data)
         
-        # 3. After all files are parsed, create the relationships (e.g., function calls) between them.
+        # 3. Persist parsed nodes, then create cross-file relationships.
+        repo_name = self.repo_path.name
+        repo_path_str = str(self.repo_path.resolve())
+        self.graph_builder.add_repository_to_graph(self.repo_path, is_dependency=False)
+        for file_data in self.all_file_data:
+            self.graph_builder.add_file_to_graph(
+                file_data, repo_name, self.imports_map, repo_path_str=repo_path_str
+            )
         self.graph_builder.link_function_calls(self.all_file_data, self.imports_map)
         self.graph_builder.link_inheritance(self.all_file_data, self.imports_map)
         # Free memory — all_file_data is only needed during the linking pass.

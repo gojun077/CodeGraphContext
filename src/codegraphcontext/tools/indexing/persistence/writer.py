@@ -364,6 +364,7 @@ class GraphWriter:
                     UNWIND $batch AS row
                     MATCH (fn:Function {name: row.func_name, path: $file_path, line_number: row.line_number})
                     MERGE (p:Parameter {name: row.arg_name, path: $file_path, function_line_number: row.line_number})
+                    SET p.name = row.arg_name, p.path = $file_path, p.function_line_number = row.line_number
                     MERGE (fn)-[:HAS_PARAMETER]->(p)
                 """,
                     batch=unique_params,

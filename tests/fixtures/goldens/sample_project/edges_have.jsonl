@@ -237,9 +237,9 @@
 {"from": "147", "to": "179", "type": "IMPORTS", "properties": {"line_number": 2, "alias": "mb", "imported_name": "module_b", "full_import_name": "module_b"}}
 {"from": "148", "to": "149", "type": "CALLS", "properties": {"line_number": 15, "args": ["5"], "full_call_name": "make_adder", "confidence": 0.95, "resolution_tier": 2, "confidence_label": "EXTRACTED"}}
 {"from": "148", "to": "149", "type": "CALLS", "properties": {"line_number": 17, "args": ["2"], "full_call_name": "make_adder", "confidence": 0.95, "resolution_tier": 2, "confidence_label": "EXTRACTED"}}
-{"from": "148", "to": "150", "type": "CALLS", "properties": {"line_number": 5, "args": ["10"], "full_call_name": "f3", "confidence": 0.95, "resolution_tier": 2, "confidence_label": "EXTRACTED"}}
-{"from": "148", "to": "152", "type": "CALLS", "properties": {"line_number": 5, "args": ["f3(10)"], "full_call_name": "f2", "confidence": 0.95, "resolution_tier": 2, "confidence_label": "EXTRACTED"}}
 {"from": "148", "to": "153", "type": "CALLS", "properties": {"line_number": 5, "args": ["f2(f3(10))"], "full_call_name": "f1", "confidence": 0.95, "resolution_tier": 2, "confidence_label": "EXTRACTED"}}
+{"from": "153", "to": "152", "type": "CALLS", "properties": {"line_number": 5, "args": ["f3(10)"], "full_call_name": "f2", "confidence": 0.95, "resolution_tier": 2, "confidence_label": "EXTRACTED"}}
+{"from": "152", "to": "150", "type": "CALLS", "properties": {"line_number": 5, "args": ["10"], "full_call_name": "f3", "confidence": 0.95, "resolution_tier": 2, "confidence_label": "EXTRACTED"}}
 {"from": "149", "to": "151", "type": "CONTAINS", "properties": {}}
 {"from": "149", "to": "180", "type": "HAS_PARAMETER", "properties": {}}
 {"from": "150", "to": "181", "type": "HAS_PARAMETER", "properties": {}}
