@@ -351,8 +351,8 @@ export default function LocalUploader({ onComplete, plain }: { onComplete: (data
               }
             }
           }
-
-          let displayName = String(properties.name || properties.label || properties.path || 'Unknown');
+          
+          let displayName = String(properties.name || properties.label || properties.uid || properties.node_type || properties.path || 'Unknown');
           if (displayName.startsWith('/') || displayName.includes('\\') || displayName.includes('/')) {
             displayName = sanitizePath(displayName, repoName);
           }

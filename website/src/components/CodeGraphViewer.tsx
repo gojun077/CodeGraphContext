@@ -351,6 +351,12 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function getNodeDisplayName(node: any): string {
+  const fallback = node?.name ?? node?.label ?? node?.uid ?? node?.node_type ?? node?.type ?? node?.id ?? 'Unknown';
+  const displayName = String(fallback).trim();
+  return displayName || 'Unknown';
+}
+
 function getGraphAwareNodeScale(totalNodes: number): number {
   const safeNodeCount = Math.max(totalNodes, 1);
   // High node count = smaller nodes to prevent overlap and visual clutter
@@ -358,10 +364,20 @@ function getGraphAwareNodeScale(totalNodes: number): number {
   return clamp(2.5 / (1 + Math.log10(safeNodeCount) * 0.95), 0.45, 2.5);
 }
 
-export default function CodeGraphViewer({ data, onClose }: { data: any, onClose: () => void }) {
+export default function CodeGraphViewer({ data: rawData, onClose }: { data: any, onClose: () => void }) {
   const { theme, setTheme } = useTheme();
   const isDark = theme !== 'light';
   const pal = isDark ? PALETTE.dark : PALETTE.light;
+
+  const data = useMemo(() => ({
+    ...rawData,
+    nodes: (rawData?.nodes || []).map((node: any) => ({
+      ...node,
+      name: getNodeDisplayName(node),
+    })),
+    links: rawData?.links || [],
+    files: rawData?.files || [],
+  }), [rawData]);
 
   const fgRef = useRef<any>();
   const [dimensions, setDimensions] = useState({ width: window.innerWidth, height: window.innerHeight });
