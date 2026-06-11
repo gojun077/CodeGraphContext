@@ -91,7 +91,7 @@ class RepositoryEventHandler(FileSystemEventHandler):
             except ValueError:
                 pass
 
-        if not self.ignore_spec:
+        if not getattr(self, "ignore_spec", None):
             return False
 
         try:
@@ -184,14 +184,107 @@ class RepositoryEventHandler(FileSystemEventHandler):
             t.cancel()
         self.timers.clear()
 
+    def _update_imports_map_for_file(self, changed_path: Path):
+        """Re-scan a single file and merge its contributions into self.imports_map."""
+        changed_str = str(changed_path.resolve())
+        for symbol in list(self.imports_map.keys()):
+            old_list = self.imports_map[symbol]
+            if changed_str in old_list:
+                new_list = [p for p in old_list if p != changed_str]
+                if new_list:
+                    self.imports_map[symbol] = new_list
+                else:
+                    del self.imports_map[symbol]
+        if changed_path.exists():
+            new_map = self.graph_builder.pre_scan_imports([changed_path])
+            for symbol, paths in new_map.items():
+                if symbol not in self.imports_map:
+                    self.imports_map[symbol] = []
+                self.imports_map[symbol].extend(paths)
+
     def _handle_modification(self, event_path_str: str):
-        changed = Path(event_path_str)
-        if self._should_ignore(changed):
+        """Incremental update: re-parse and re-link only the changed file and its neighbours."""
+        info_logger(f"File change detected (incremental update): {event_path_str}")
+        changed_path = Path(event_path_str)
+        if self._should_ignore(changed_path):
+            debug_log(f"Ignored watcher update based on .cgcignore: {changed_path}")
             return
 
-        self.graph_builder.update_file_in_graph(
-            changed, self.repo_path, self.imports_map
+        changed_path_str = changed_path.resolve().as_posix()
+        supported_extensions = self.graph_builder.parsers.keys()
+
+        caller_paths = self.graph_builder.get_caller_file_paths(changed_path_str)
+        inheritor_paths = self.graph_builder.get_inheritance_neighbor_paths(changed_path_str)
+        affected_paths = {changed_path_str} | caller_paths | inheritor_paths
+        info_logger(
+            f"[INCREMENTAL] affected={len(affected_paths)} files "
+            f"(callers={len(caller_paths)}, inheritors={len(inheritor_paths)})"
         )
+
+        self._update_imports_map_for_file(changed_path)
+
+        self.graph_builder.update_file_in_graph(changed_path, self.repo_path, self.imports_map)
+
+        other_callers = list(caller_paths)
+        other_inheritors = list(inheritor_paths)
+        if other_callers:
+            self.graph_builder.delete_outgoing_calls_from_files(other_callers)
+        if other_inheritors:
+            self.graph_builder.delete_inherits_for_files(other_inheritors)
+
+        subset_file_data = []
+        for path_str in affected_paths:
+            p = Path(path_str)
+            if p.exists() and p.suffix in supported_extensions and not self._should_ignore(p):
+                parsed = self.graph_builder.parse_file(self.repo_path, p)
+                if "error" not in parsed:
+                    subset_file_data.append(parsed)
+
+        file_class_lookup = self.graph_builder.get_repo_class_lookup(self.repo_path)
+
+        info_logger(f"[INCREMENTAL] Re-linking {len(subset_file_data)} files...")
+        self.graph_builder.link_function_calls(
+            subset_file_data, self.imports_map, file_class_lookup
+        )
+        self.graph_builder.link_inheritance(subset_file_data, self.imports_map)
+
+        try:
+            from codegraphcontext.cli.config_manager import get_config_value as _gcv
+            _vector_enabled = (_gcv("ENABLE_VECTOR_RESOLVE") or "false").lower() == "true"
+            _inherit_enabled = (_gcv("ENABLE_INHERIT_RESOLVE") or "false").lower() == "true"
+        except Exception as _cfg_e:
+            warning_logger(f"[PHASE4/5] Could not read config flags: {_cfg_e}")
+            _vector_enabled = False
+            _inherit_enabled = False
+
+        if _vector_enabled:
+            try:
+                from codegraphcontext.tools.indexing.embeddings import EmbeddingPipeline
+                embed_pipeline = EmbeddingPipeline(self.graph_builder.driver)
+                embed_pipeline.invalidate_for_file(changed_path_str)
+                embed_pipeline.run(str(self.repo_path))
+                info_logger(f"[EMBED] Incremental embedding complete for {changed_path_str}")
+            except Exception as _e:
+                warning_logger(f"[EMBED] Incremental embedding failed: {_e}")
+
+        if _inherit_enabled:
+            try:
+                from codegraphcontext.tools.indexing.resolution.post_resolution import run_inheritance_reresolve
+                _vector_resolver = None
+                if _vector_enabled:
+                    try:
+                        from codegraphcontext.tools.indexing.vector_resolver import VectorResolver
+                        _vector_resolver = VectorResolver(self.graph_builder.driver)
+                    except Exception as _ve:
+                        warning_logger(f"[VECTOR] Resolver unavailable for watcher: {_ve}")
+                n_improved = run_inheritance_reresolve(
+                    self.graph_builder.driver, str(self.repo_path), _vector_resolver
+                )
+                info_logger(f"[INHERIT-RESOLVE] Incremental: {n_improved} edges improved")
+            except Exception as _e:
+                warning_logger(f"[INHERIT-RESOLVE] Incremental failed: {_e}")
+
+        info_logger(f"[INCREMENTAL] Done. Graph refresh for {event_path_str} complete! ✅")
 
     def on_created(self, event):
         if not event.is_directory and self._is_supported_code_file(event.src_path):

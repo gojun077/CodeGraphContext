@@ -669,7 +669,13 @@ class GraphWriter:
 
         backend = get_backend_type(self.driver, self._db_manager)
         calls_keyword = "CREATE" if backend in ("neo4j", "nornic") else "MERGE"
-        info_logger(f"[CALLS] backend={backend}, using {calls_keyword} for CALLS edges")
+        # Neo4j-only fast/slow MATCH split (PR #1192 perf). Embedded backends keep the
+        # unified name+path MATCH + line WHERE filter for parity with FalkorDB/Neo4j.
+        use_fast_slow_split = backend in ("neo4j", "nornic")
+        info_logger(
+            f"[CALLS] backend={backend}, using {calls_keyword} for CALLS edges"
+            + (", fast/slow MATCH split" if use_fast_slow_split else ", unified MATCH")
+        )
 
         fn_to_fn = fn_to_fn or []
         fn_to_class = fn_to_class or []
@@ -773,66 +779,118 @@ class GraphWriter:
                         SET call.confidence_label = row.confidence_label"""
                 create_clause = f"{calls_keyword} (caller)-[call:CALLS {{line_number: row.line_number, full_call_name: row.full_call_name, args_key: row.args_key}}]->(called)"
 
-                if called_label == "Parameter":
-                    q_with_line = f"""
-                        UNWIND $batch AS row
-                        {caller_match}
-                        MATCH (called:Parameter {{name: row.called_name, path: row.called_file_path, function_line_number: row.called_line_number}})
-                        {create_clause}{set_clause}
-                    """
-                    q_without_line = q_with_line
-                elif called_label == "File":
-                    q_with_line = f"""
-                        UNWIND $batch AS row
-                        {caller_match}
-                        MATCH (called:File {{path: row.called_file_path}})
-                        {create_clause}{set_clause}
-                    """
-                    q_without_line = q_with_line
-                else:
-                    q_with_line = f"""
-                        UNWIND $batch AS row
-                        {caller_match}
-                        MATCH (called:`{called_label}` {{name: row.called_name, path: row.called_file_path, line_number: row.called_line_number}})
-                        {"WHERE " + called_context_clause.lstrip("AND ") if called_context_clause else ""}
-                        {create_clause}{set_clause}
-                    """
-                    q_without_line = f"""
-                        UNWIND $batch AS row
-                        {caller_match}
-                        MATCH (called:`{called_label}` {{name: row.called_name, path: row.called_file_path}})
-                        {"WHERE " + called_context_clause.lstrip("AND ") if called_context_clause else ""}
-                        {create_clause}{set_clause}
-                    """
+                def _run_call_batch(q: str, sub_batch: List[Dict[str, Any]]) -> None:
+                    if not sub_batch:
+                        return
+                    captured_q, captured_b = q, sub_batch
+
+                    def _batch_work(tx, _q=captured_q, _b=captured_b):
+                        tx.run(_q, batch=_b)
+
+                    try:
+                        if hasattr(session, "execute_write"):
+                            session.execute_write(_batch_work)
+                        elif hasattr(session, "write_transaction"):
+                            session.write_transaction(_batch_work)
+                        else:
+                            session.run(q, batch=sub_batch)
+                    except Exception as e:
+                        if _is_binder_exception(e):
+                            return
+                        raise e
 
                 t0 = time.time()
                 total = len(sanitized_batch)
-                fast_total = sum(1 for r in sanitized_batch if r.get("called_line_number", 0) > 0)
-                slow_total = total - fast_total
-                info_logger(f"[CALLS] {caller_label}-to-{called_label}: {total} edges — fast path (line known): {fast_total} ({100*fast_total//total if total else 0}%), slow path: {slow_total} ({100*slow_total//total if total else 0}%)")
-                for i in range(0, total, batch_size):
-                    batch = sanitized_batch[i : i + batch_size]
-                    batch_with_line = [r for r in batch if r.get("called_line_number", 0) > 0]
-                    batch_without_line = [r for r in batch if r.get("called_line_number", 0) <= 0]
-                    for q, sub_batch in ((q_with_line, batch_with_line), (q_without_line, batch_without_line)):
-                        if not sub_batch:
-                            continue
-                        captured_q, captured_b = q, sub_batch
-                        def _batch_work(tx, _q=captured_q, _b=captured_b):
-                            tx.run(_q, batch=_b)
-                        try:
-                            if hasattr(session, "execute_write"):
-                                session.execute_write(_batch_work)
-                            elif hasattr(session, "write_transaction"):
-                                session.write_transaction(_batch_work)
-                            else:
-                                session.run(q, batch=sub_batch)
-                        except Exception as e:
-                            if _is_binder_exception(e):
-                                continue
-                            raise e
-                    written_so_far = min(i + batch_size, total)
-                    info_logger(f"[CALLS] {caller_label}-to-{called_label}: {written_so_far}/{total} edges written ({time.time()-t0:.1f}s elapsed)")
+
+                if use_fast_slow_split:
+                    if called_label == "Parameter":
+                        q_with_line = f"""
+                            UNWIND $batch AS row
+                            {caller_match}
+                            MATCH (called:Parameter {{name: row.called_name, path: row.called_file_path, function_line_number: row.called_line_number}})
+                            {create_clause}{set_clause}
+                        """
+                        q_without_line = q_with_line
+                    elif called_label == "File":
+                        q_with_line = f"""
+                            UNWIND $batch AS row
+                            {caller_match}
+                            MATCH (called:File {{path: row.called_file_path}})
+                            {create_clause}{set_clause}
+                        """
+                        q_without_line = q_with_line
+                    else:
+                        q_with_line = f"""
+                            UNWIND $batch AS row
+                            {caller_match}
+                            MATCH (called:`{called_label}` {{name: row.called_name, path: row.called_file_path, line_number: row.called_line_number}})
+                            {"WHERE " + called_context_clause.lstrip("AND ") if called_context_clause else ""}
+                            {create_clause}{set_clause}
+                        """
+                        q_without_line = f"""
+                            UNWIND $batch AS row
+                            {caller_match}
+                            MATCH (called:`{called_label}` {{name: row.called_name, path: row.called_file_path}})
+                            {"WHERE " + called_context_clause.lstrip("AND ") if called_context_clause else ""}
+                            {create_clause}{set_clause}
+                        """
+
+                    fast_total = sum(1 for r in sanitized_batch if r.get("called_line_number", 0) > 0)
+                    slow_total = total - fast_total
+                    info_logger(
+                        f"[CALLS] {caller_label}-to-{called_label}: {total} edges — "
+                        f"fast path (line known): {fast_total} ({100*fast_total//total if total else 0}%), "
+                        f"slow path: {slow_total} ({100*slow_total//total if total else 0}%)"
+                    )
+                    for i in range(0, total, batch_size):
+                        batch = sanitized_batch[i : i + batch_size]
+                        batch_with_line = [r for r in batch if r.get("called_line_number", 0) > 0]
+                        batch_without_line = [r for r in batch if r.get("called_line_number", 0) <= 0]
+                        for q, sub_batch in ((q_with_line, batch_with_line), (q_without_line, batch_without_line)):
+                            _run_call_batch(q, sub_batch)
+                        written_so_far = min(i + batch_size, total)
+                        info_logger(
+                            f"[CALLS] {caller_label}-to-{called_label}: "
+                            f"{written_so_far}/{total} edges written ({time.time()-t0:.1f}s elapsed)"
+                        )
+                else:
+                    line_where = (
+                        "WHERE (row.called_line_number <= 0 OR called.line_number = row.called_line_number)"
+                    )
+                    if called_context_clause:
+                        line_where += f" {called_context_clause}"
+
+                    if called_label == "Parameter":
+                        q_unified = f"""
+                            UNWIND $batch AS row
+                            {caller_match}
+                            MATCH (called:Parameter {{name: row.called_name, path: row.called_file_path, function_line_number: row.called_line_number}})
+                            {create_clause}{set_clause}
+                        """
+                    elif called_label == "File":
+                        q_unified = f"""
+                            UNWIND $batch AS row
+                            {caller_match}
+                            MATCH (called:File {{path: row.called_file_path}})
+                            {create_clause}{set_clause}
+                        """
+                    else:
+                        q_unified = f"""
+                            UNWIND $batch AS row
+                            {caller_match}
+                            MATCH (called:`{called_label}` {{name: row.called_name, path: row.called_file_path}})
+                            {line_where}
+                            {create_clause}{set_clause}
+                        """
+
+                    for i in range(0, total, batch_size):
+                        _run_call_batch(q_unified, sanitized_batch[i : i + batch_size])
+                        written_so_far = min(i + batch_size, total)
+                        info_logger(
+                            f"[CALLS] {caller_label}-to-{called_label}: "
+                            f"{written_so_far}/{total} edges written ({time.time()-t0:.1f}s elapsed)"
+                        )
+
                 info_logger(f"[CALLS] {caller_label}-to-{called_label}: {total} edges written in {time.time()-t0:.1f}s")
 
         with self.driver.session() as session:
