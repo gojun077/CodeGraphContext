@@ -34,9 +34,10 @@ def delete_repository(graph_builder: GraphBuilder, **args) -> Dict[str, Any]:
         }
 
     repo_path = args.get("repo_path") or args.get("path")
-    if not repo_path or not str(repo_path).strip():
-        return {"error": "Repository path is required (repo_path)."}
+    repo_path = args.get("repo_path") or args.get("path") or args.get("repo")
 
+    if not repo_path:
+            return {"error": "Repository path is required (repo_path)."}
     repo_path = str(repo_path).strip()
     try:
         debug_log(f"Deleting repository: {repo_path}")

@@ -1512,8 +1512,11 @@ class GraphWriter:
         backend = get_backend_type(self.driver, self._db_manager)
 
         def _delete_repo_node(session):
-            session.run("MATCH (r:Repository {path: $path}) DETACH DELETE r", path=repo_path_str)
-
+            session.run("""
+MATCH (r:Repository {path: $path})
+OPTIONAL MATCH (r)-[:CONTAINS*]->(n)
+DETACH DELETE r, n
+""", path=repo_path_str)
         execute_write_operation(self.driver, backend, _delete_repo_node)
         info_logger(f"Deleted repository and its contents from graph: {repo_path_str}")
         return True
