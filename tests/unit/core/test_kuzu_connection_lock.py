@@ -92,8 +92,8 @@ class TestLockHeldDuringExecute:
         assert acquired_during_execute, "execute() was never called"
         assert all(acquired_during_execute), "Lock was not held during write conn.execute()"
 
-    def test_lock_not_acquired_during_read_execute(self):
-        """conn.execute() must NOT acquire the _write_lock for read-only queries."""
+    def test_lock_acquired_during_read_execute(self):
+        """conn.execute() must hold _write_lock for reads too — kuzu.Connection is not thread-safe."""
         lock = threading.RLock()
         acquired_during_execute = []
 
@@ -108,7 +108,7 @@ class TestLockHeldDuringExecute:
         session.run("MATCH (n:Class) RETURN n")
 
         assert acquired_during_execute, "execute() was never called"
-        assert not any(acquired_during_execute), "Lock was incorrectly held during read conn.execute()"
+        assert all(acquired_during_execute), "Lock was not held during read conn.execute()"
 
     def test_lock_released_after_write_execute(self):
         """The _write_lock must be released after run() on a write query returns normally."""

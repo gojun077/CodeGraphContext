@@ -91,7 +91,8 @@ class RepositoryEventHandler(FileSystemEventHandler):
             except ValueError:
                 pass
 
-        if not self.ignore_spec:
+        ignore_spec = getattr(self, "ignore_spec", None)
+        if not ignore_spec:
             return False
 
         try:
@@ -99,7 +100,7 @@ class RepositoryEventHandler(FileSystemEventHandler):
         except ValueError:
             return False
 
-        return self.ignore_spec.match_file(rel)
+        return ignore_spec.match_file(rel)
 
     def _is_supported_code_file(self, path: str | Path) -> bool:
         path_obj = Path(path)
@@ -159,16 +160,22 @@ class RepositoryEventHandler(FileSystemEventHandler):
             self.graph_builder.delete_file_from_graph(stale)
 
         refreshed = []
+        refreshed_paths: list[str] = []
         for p in current_files:
             fd = self.graph_builder.update_file_in_graph(
                 p, self.repo_path, self.imports_map
             )
             if fd and "error" not in fd:
                 refreshed.append(fd)
+                refreshed_paths.append(p.resolve().as_posix())
 
-        self.graph_builder.delete_relationship_links(self.repo_path)
-        self.graph_builder.link_function_calls(refreshed, self.imports_map)
-        self.graph_builder.link_inheritance(refreshed, self.imports_map)
+        if refreshed_paths:
+            # Only clear edges originating from the files we touched — do not
+            # wipe the entire repo call graph like delete_relationship_links().
+            self.graph_builder.delete_outgoing_calls_from_files(refreshed_paths)
+            self.graph_builder.delete_inherits_for_files(refreshed_paths)
+            self.graph_builder.link_function_calls(refreshed, self.imports_map)
+            self.graph_builder.link_inheritance(refreshed, self.imports_map)
 
         info_logger("Sync complete")
 
@@ -184,14 +191,46 @@ class RepositoryEventHandler(FileSystemEventHandler):
             t.cancel()
         self.timers.clear()
 
+    def _update_imports_map_for_file(self, file_path: str | Path) -> None:
+        """Refresh the global imports map for a single changed file."""
+        path = Path(file_path)
+        if not path.exists() or not self._is_supported_code_file(path):
+            return
+        partial = self.graph_builder.pre_scan_imports([path])
+        if partial:
+            self.imports_map.update(partial)
+
     def _handle_modification(self, event_path_str: str):
         changed = Path(event_path_str)
         if self._should_ignore(changed):
             return
 
-        self.graph_builder.update_file_in_graph(
+        file_path_str = changed.resolve().as_posix()
+        self._update_imports_map_for_file(changed)
+
+        file_data = self.graph_builder.update_file_in_graph(
             changed, self.repo_path, self.imports_map
         )
+
+        caller_paths = {
+            p
+            for p in self.graph_builder.get_caller_file_paths(file_path_str)
+            if p and not self._should_ignore(p)
+        }
+        if caller_paths:
+            self.graph_builder.delete_outgoing_calls_from_files(sorted(caller_paths))
+
+        files_to_link = []
+        if (
+            file_data
+            and isinstance(file_data, dict)
+            and "error" not in file_data
+            and not file_data.get("deleted")
+        ):
+            files_to_link.append(file_data)
+
+        self.graph_builder.link_function_calls(files_to_link, self.imports_map)
+        self.graph_builder.link_inheritance(files_to_link, self.imports_map)
 
     def on_created(self, event):
         if not event.is_directory and self._is_supported_code_file(event.src_path):

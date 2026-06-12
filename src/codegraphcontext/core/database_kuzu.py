@@ -17,6 +17,19 @@ from typing import Optional, Tuple, Dict, Any, List
 
 from codegraphcontext.utils.debug_log import debug_log, info_logger, error_logger, warning_logger
 
+
+class _KuzuCompatState:
+    """
+    Shared fail-fast state for unsupported query types (fulltext/module_deps).
+    Lives on the manager (long-lived) so that disabling a query type sticks
+    across sessions instead of resetting with every new session wrapper.
+    """
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.disabled_query_types = set()
+        self.logged_disabled_query_types = set()
+
+
 class KuzuDBManager:
     """
     Manages the KùzuDB database connection as a singleton.
@@ -27,6 +40,7 @@ class KuzuDBManager:
     _lock = threading.Lock()         # Guards singleton initialisation only.
     _write_lock = threading.RLock()  # Serialises every write query (reentrant for fallback).
     _query_lock = threading.RLock()  # Kept for backward compat / legacy wrappers if any.
+    _compat_state = _KuzuCompatState()  # Shared across all sessions of this process.
 
     def __new__(cls, *args, **kwargs):
         """Standard singleton pattern implementation."""
@@ -108,7 +122,8 @@ class KuzuDBManager:
                                 error_logger(f"Failed to initialize KùzuDB: {e}")
                                 raise
 
-        return KuzuDriverWrapper(self._db, self._pool, self._write_lock)
+        return KuzuDriverWrapper(self._db, self._pool, self._write_lock,
+                                 compat_state=KuzuDBManager._compat_state)
 
     def _initialize_schema(self):
         """Creates Node and Rel tables if they don't exist."""
@@ -414,8 +429,9 @@ class KuzuDBManager:
         except ImportError:
             return False, "KùzuDB is not installed. Run 'pip install kuzu'"
 class KuzuDriverWrapper:
-    def __init__(self, db, pool_or_lock, write_lock=None):
+    def __init__(self, db, pool_or_lock, write_lock=None, compat_state=None):
         self.db = db
+        self._compat_state = compat_state
         if hasattr(pool_or_lock, "acquire"):
             self._pool = None
             self._write_lock = pool_or_lock
@@ -426,24 +442,30 @@ class KuzuDriverWrapper:
             self._query_lock = self._write_lock
     def session(self, **kwargs):
         """Accepts and ignores Neo4j-specific kwargs (e.g. default_access_mode)."""
+        compat_state = getattr(self, "_compat_state", None)
         pool = getattr(self, "_pool", None)
         if pool is not None:
-            return KuzuSessionWrapper(pool, getattr(self, "_write_lock", None))
+            return KuzuSessionWrapper(pool, getattr(self, "_write_lock", None), compat_state=compat_state)
         else:
             db = getattr(self, "db", None) or getattr(self, "conn", None)
             write_lock = getattr(self, "_write_lock", None) or getattr(self, "_query_lock", None)
-            return KuzuSessionWrapper(db, write_lock)
+            return KuzuSessionWrapper(db, write_lock, compat_state=compat_state)
     def close(self):
         pass
 
 
 class KuzuSessionWrapper:
-    def __init__(self, pool_or_conn, write_lock=None):
+    def __init__(self, pool_or_conn, write_lock=None, compat_state=None):
         self._write_lock = write_lock or threading.Lock()
         self._query_lock = self._write_lock
-        self._disabled_query_types = set()
-        self._logged_disabled_query_types = set()
-        self._state_lock = threading.Lock()
+        # Disabled-query-type state is shared via the manager's compat_state so
+        # fail-fast disabling persists across sessions. A standalone session
+        # (tests / legacy callers) gets its own private state.
+        state = compat_state or _KuzuCompatState()
+        self._compat_state = state
+        self._disabled_query_types = state.disabled_query_types
+        self._logged_disabled_query_types = state.logged_disabled_query_types
+        self._state_lock = state.lock
         
         # Backward compatibility check: check if it's a pool or connection
         if hasattr(pool_or_conn, "get") and not hasattr(pool_or_conn, "execute"):
@@ -620,16 +642,13 @@ class KuzuSessionWrapper:
             if "UNWIND" in query and ("-[" in query or "]->" in query) and not getattr(self, "_skip_unwind_fallback", False):
                 raise Exception("unordered_map::at (forced fallback to avoid relationship UNWIND planner bugs)")
 
-            # 2. Execute with appropriate locking
-            # Only write queries need the global lock. Read-only queries can execute concurrently.
-            if query_type == "write":
-                with self._write_lock:
-                    result = self.conn.execute(translated_query, translated_params)
-            else:
+            # 2. Execute under the lock. _write_lock (name kept for backward
+            # compat) now serializes ALL access, reads included: kuzu.Connection
+            # is not thread-safe, and concurrent asyncio.to_thread tool calls can
+            # otherwise race a read against a write on the same connection.
+            with self._write_lock:
                 result = self.conn.execute(translated_query, translated_params)
 
-
-                
             return KuzuResultWrapper(result)
         except Exception as e:
             if self._should_fail_fast(query_type, e):
@@ -696,7 +715,7 @@ class KuzuSessionWrapper:
         
         # 0. Define Schema Map (Strict property filtering)
         SCHEMA_MAP = {
-            'Repository': {'path', 'name', 'is_dependency'},
+            'Repository': {'path', 'name', 'is_dependency', 'indexed_at', 'commit_hash'},
             'File': {'path', 'name', 'relative_path', 'package_name', 'is_dependency'},
             'Directory': {'path', 'name'},
             'Module': {'name', 'lang', 'full_import_name', 'path', 'line_number'},
@@ -975,36 +994,6 @@ class KuzuSessionWrapper:
 
         # 4. Polymorphic matches and label access
         query = query.replace("labels(n)[0]", "label(n)")
-        
-        # Translate (n:Label1 OR n:Label2 ...) to label(n) IN ['Label1', 'Label2', ...]
-        def poly_replacer(match):
-            full_match = match.group(0)
-            var_name = match.group(1)
-            # Find all labels associated with this variable in the OR chain
-            labels = re.findall(rf'{var_name}:([a-zA-Z0-9_]+)', full_match)
-            return f"label({var_name}) IN {json.dumps(labels)}"
-        
-        # Regex to match (n:Label1 OR n:Label2 OR n:Label3)
-        query = re.sub(r'\((\w+):[a-zA-Z0-9_]+(?:\s+OR\s+\1:[a-zA-Z0-9_]+)+\)', poly_replacer, query)
-        
-        # Translate single WHERE n:Label to label(n) = 'Label'
-        # This is more complex because we don't want to match MATCH/MERGE
-        # For now, we only target where it appears after WHERE or AND/OR
-        def single_label_replacer(match):
-            prefix = match.group(1)
-            var_name = match.group(2)
-            label = match.group(3)
-            return f"{prefix}label({var_name}) = '{label}'"
-            
-        query = re.sub(r'(WHERE\s+|AND\s+|OR\s+|WHEN\s+)(\w+):([a-zA-Z0-9_]+)', single_label_replacer, query, flags=re.IGNORECASE)
-
-        # Handle NOT n:Label → NOT label(n) = 'Label'
-        def not_label_replacer(match):
-            prefix = match.group(1)
-            var_name = match.group(2)
-            label_name = match.group(3)
-            return f"{prefix}NOT label({var_name}) = '{label_name}'"
-        query = re.sub(r'(WHERE\s+|AND\s+|OR\s+)NOT\s+(\w+):([a-zA-Z0-9_]+)', not_label_replacer, query, flags=re.IGNORECASE)
 
         query = query.replace("coalesce(", "COALESCE(")
         query = re.sub(r'\btype\(', 'label(', query)

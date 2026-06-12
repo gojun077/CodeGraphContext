@@ -15,6 +15,19 @@ from typing import Optional, Tuple, Dict, Any, List
 
 from codegraphcontext.utils.debug_log import debug_log, info_logger, error_logger, warning_logger
 
+
+class _LadybugCompatState:
+    """
+    Shared fail-fast state for unsupported query types (fulltext/module_deps).
+    Lives on the manager (long-lived) so that disabling a query type sticks
+    across sessions instead of resetting with every new session wrapper.
+    """
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.disabled_query_types = set()
+        self.logged_disabled_query_types = set()
+
+
 class LadybugDBManager:
     """
     Manages the LadybugDB database connection as a singleton.
@@ -25,6 +38,7 @@ class LadybugDBManager:
     _lock = threading.Lock()         # Guards singleton initialisation only.
     _write_lock = threading.RLock()  # Serialises every write query (reentrant for fallback).
     _query_lock = threading.RLock()  # Kept for backward compat / legacy wrappers if any.
+    _compat_state = _LadybugCompatState()  # Shared across all sessions of this process.
 
     def __new__(cls, *args, **kwargs):
         """Standard singleton pattern implementation."""
@@ -106,7 +120,8 @@ class LadybugDBManager:
                                 error_logger(f"Failed to initialize LadybugDB: {e}")
                                 raise
 
-        return LadybugDriverWrapper(self._db, self._pool, self._write_lock)
+        return LadybugDriverWrapper(self._db, self._pool, self._write_lock,
+                                    compat_state=LadybugDBManager._compat_state)
 
     def _initialize_schema(self):
         """Creates Node and Rel tables if they don't exist."""
@@ -357,8 +372,9 @@ class LadybugDBManager:
             return False, "LadybugDB is not installed. Run 'pip install ladybug'"
 
 class LadybugDriverWrapper:
-    def __init__(self, db, pool_or_lock, write_lock=None):
+    def __init__(self, db, pool_or_lock, write_lock=None, compat_state=None):
         self.db = db
+        self._compat_state = compat_state
         if hasattr(pool_or_lock, "acquire"):
             self._pool = None
             self._write_lock = pool_or_lock
@@ -369,20 +385,25 @@ class LadybugDriverWrapper:
             self._query_lock = self._write_lock
     def session(self):
         if self._pool is not None:
-            return LadybugSessionWrapper(self._pool, self._write_lock)
+            return LadybugSessionWrapper(self._pool, self._write_lock, compat_state=self._compat_state)
         else:
-            return LadybugSessionWrapper(self.db, self._write_lock)
+            return LadybugSessionWrapper(self.db, self._write_lock, compat_state=self._compat_state)
     def close(self):
         pass
 
 
 class LadybugSessionWrapper:
-    def __init__(self, pool_or_conn, write_lock=None):
+    def __init__(self, pool_or_conn, write_lock=None, compat_state=None):
         self._write_lock = write_lock or threading.Lock()
         self._query_lock = self._write_lock
-        self._disabled_query_types = set()
-        self._logged_disabled_query_types = set()
-        self._state_lock = threading.Lock()
+        # Disabled-query-type state is shared via the manager's compat_state so
+        # fail-fast disabling persists across sessions. A standalone session
+        # (tests / legacy callers) gets its own private state.
+        state = compat_state or _LadybugCompatState()
+        self._compat_state = state
+        self._disabled_query_types = state.disabled_query_types
+        self._logged_disabled_query_types = state.logged_disabled_query_types
+        self._state_lock = state.lock
         
         # Backward compatibility check: check if it's a pool or connection
         if hasattr(pool_or_conn, "get") and not hasattr(pool_or_conn, "execute"):
@@ -559,16 +580,13 @@ class LadybugSessionWrapper:
             if "UNWIND" in query and ("-[" in query or "]->" in query):
                 raise Exception("unordered_map::at (forced fallback to avoid relationship UNWIND planner bugs)")
 
-            # 2. Execute with appropriate locking
-            # Only write queries need the global lock. Read-only queries can execute concurrently.
-            if query_type == "write":
-                with self._write_lock:
-                    result = self.conn.execute(translated_query, translated_params)
-            else:
+            # 2. Execute under the lock. _write_lock (name kept for backward
+            # compat) now serializes ALL access, reads included: the underlying
+            # connection is not thread-safe, and concurrent asyncio.to_thread
+            # tool calls can otherwise race a read against a write.
+            with self._write_lock:
                 result = self.conn.execute(translated_query, translated_params)
 
-
-                
             return LadybugResultWrapper(result)
         except Exception as e:
             if self._should_fail_fast(query_type, e):
@@ -637,7 +655,7 @@ class LadybugSessionWrapper:
         
         # 0. Define Schema Map (Strict property filtering)
         SCHEMA_MAP = {
-            'Repository': {'path', 'name', 'is_dependency'},
+            'Repository': {'path', 'name', 'is_dependency', 'indexed_at', 'commit_hash'},
             'File': {'path', 'name', 'relative_path', 'package_name', 'is_dependency'},
             'Directory': {'path', 'name'},
             'Module': {'name', 'lang', 'full_import_name', 'path', 'line_number'},
