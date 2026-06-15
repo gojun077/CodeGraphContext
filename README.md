@@ -206,8 +206,8 @@ _If you’re using CodeGraphContext in your project, feel free to open a PR and 
 - `rich>=13.7.0`
 - `inquirerpy>=0.3.4`
 - `python-dotenv>=1.0.0`
-- `tree-sitter>=0.21.0` (not installed on Python 3.13)
-- `tree-sitter-language-pack>=0.6.0` (not installed on Python 3.13)
+- `tree-sitter>=0.24.0,<0.26.0`
+- `tree-sitter-language-pack>=1.6,<2.0`
 - `pyyaml`
 - `pathspec>=0.12.1`
 - `falkordb>=1.0,<1.6`
